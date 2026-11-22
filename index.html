@@ -110,20 +110,13 @@
       <strong>🎀 2. Result</strong>
       <div class="row">
         <select id="mode">
-          <option value="clean" selected>Clean (white paper, color)</option>
-          <option value="bw">Black &amp; white (sharp text)</option>
-          <option value="gray">Grayscale</option>
-          <option value="orig">Original (cropped only)</option>
+          <option value="bw" selected>Sharp text (B&amp;W)</option>
+          <option value="gray">Soft grayscale</option>
+          <option value="clean">Color</option>
+          <option value="orig">Original (cropped)</option>
         </select>
         <button id="rotBtn" title="Rotate 90°">⟳ Rotate</button>
       </div>
-    </div>
-    <div class="sliders">
-      <label>Contrast / darkness <input id="contrast" type="range" min="0" max="100" value="60"></label>
-      <label>Sharpness <input id="sharp" type="range" min="0" max="100" value="60"></label>
-      <label>Smooth dotted text <input id="smooth" type="range" min="0" max="100" value="45"></label>
-      <label>Color (Clean mode) <input id="color" type="range" min="0" max="100" value="25"></label>
-      <label>Trim edges <input id="trim" type="range" min="0" max="6" step="0.5" value="1.5"></label>
     </div>
     <div id="resultWrap"><canvas id="result"></canvas></div>
     <div class="row" style="margin-top:12px">
@@ -235,15 +228,23 @@ function detectCorners(canvas) {
 }
 function boxBlur(src, w, h, r) {
   const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    let s = 0, n = 0;
-    for (let i = -r; i <= r; i++) { const xx = x + i; if (xx >= 0 && xx < w) { s += src[y*w+xx]; n++; } }
-    tmp[y*w+x] = s / n;
+  for (let y = 0; y < h; y++) {
+    const row = y * w; let sum = 0;
+    for (let i = 0; i <= Math.min(r, w - 1); i++) sum += src[row + i];
+    for (let x = 0; x < w; x++) {
+      const lo = Math.max(0, x - r), hi = Math.min(w - 1, x + r);
+      tmp[row + x] = sum / (hi - lo + 1);
+      if (x + r + 1 < w) sum += src[row + x + r + 1];
+      if (x - r >= 0) sum -= src[row + x - r];
+    }
   }
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    let s = 0, n = 0;
-    for (let i = -r; i <= r; i++) { const yy = y + i; if (yy >= 0 && yy < h) { s += tmp[yy*w+x]; n++; } }
-    out[y*w+x] = s / n;
+  const col = new Float64Array(w);
+  for (let y = 0; y <= Math.min(r, h - 1); y++) for (let x = 0; x < w; x++) col[x] += tmp[y * w + x];
+  for (let y = 0; y < h; y++) {
+    const lo = Math.max(0, y - r), hi = Math.min(h - 1, y + r), n = hi - lo + 1, row = y * w;
+    for (let x = 0; x < w; x++) out[row + x] = col[x] / n;
+    if (y + r + 1 < h) { const rr = (y + r + 1) * w; for (let x = 0; x < w; x++) col[x] += tmp[rr + x]; }
+    if (y - r >= 0) { const rr = (y - r) * w; for (let x = 0; x < w; x++) col[x] -= tmp[rr + x]; }
   }
   return out;
 }
@@ -341,32 +342,36 @@ function solveHomography(dst, src) {
   }
   return x;
 }
+const OUT_MAX = 6e6;
 function warp() {
   const [tl, tr, br, bl] = corners;
   const dist = (a, b) => Math.hypot(a[0]-b[0], a[1]-b[1]);
   let W = Math.max(dist(tl, tr), dist(bl, br)), H = Math.max(dist(tl, bl), dist(tr, br));
-  let up = Math.min(W, H) < 1200 ? Math.min(2, 1200 / Math.min(W, H)) : 1;
-  if (W * H * up * up > 9e6) up = Math.sqrt(9e6 / (W * H));
+  let up = Math.min(W, H) < 1500 ? Math.min(2, 1500 / Math.min(W, H)) : 1;   // upscale small receipts for smoother glyphs
+  if (W * H * up * up > OUT_MAX) up = Math.sqrt(OUT_MAX / (W * H));
   W = Math.max(16, Math.round(W * up)); H = Math.max(16, Math.round(H * up));
   const hm = solveHomography([[0,0],[W,0],[W,H],[0,H]], corners);
-  const sctx = srcCanvas.getContext('2d'), sw = srcCanvas.width, sh = srcCanvas.height;
-  const sd = sctx.getImageData(0, 0, sw, sh).data;
-  const out = new ImageData(W, H), od = out.data;
+  const sw = srcCanvas.width, sh = srcCanvas.height, sd = srcCanvas.getContext('2d').getImageData(0, 0, sw, sh).data;
+  const out = new ImageData(W, H), od = out.data, wx = new Float32Array(4), wy = new Float32Array(4);
+  const cr = (t, w) => { const t2 = t*t, t3 = t2*t; w[0] = -0.5*t3 + t2 - 0.5*t; w[1] = 1.5*t3 - 2.5*t2 + 1; w[2] = -1.5*t3 + 2*t2 + 0.5*t; w[3] = 0.5*t3 - 0.5*t2; };
   for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) {
     const den = hm[6]*u + hm[7]*v + 1;
     const x = (hm[0]*u + hm[1]*v + hm[2]) / den, y = (hm[3]*u + hm[4]*v + hm[5]) / den;
-    const x0 = Math.max(0, Math.min(sw - 2, Math.floor(x))), y0 = Math.max(0, Math.min(sh - 2, Math.floor(y)));
-    const fx = Math.min(1, Math.max(0, x - x0)), fy = Math.min(1, Math.max(0, y - y0));
-    const i00 = (y0*sw + x0) * 4, i10 = i00 + 4, i01 = i00 + sw*4, i11 = i01 + 4, o = (v*W + u) * 4;
-    for (let c = 0; c < 3; c++) {
-      od[o+c] = sd[i00+c]*(1-fx)*(1-fy) + sd[i10+c]*fx*(1-fy) + sd[i01+c]*(1-fx)*fy + sd[i11+c]*fx*fy;
+    const xi = Math.floor(x), yi = Math.floor(y);
+    cr(x - xi, wx); cr(y - yi, wy);
+    let r = 0, g = 0, b = 0;
+    for (let j = 0; j < 4; j++) {
+      const yy = Math.min(sh - 1, Math.max(0, yi - 1 + j)) * sw;
+      for (let i = 0; i < 4; i++) {
+        const xx = Math.min(sw - 1, Math.max(0, xi - 1 + i)), w = wx[i] * wy[j], k = (yy + xx) * 4;
+        r += sd[k] * w; g += sd[k+1] * w; b += sd[k+2] * w;
+      }
     }
-    od[o+3] = 255;
+    const o = (v*W + u) * 4; od[o] = r; od[o+1] = g; od[o+2] = b; od[o+3] = 255;
   }
   return out;
 }
 
-/* ---------- Enhancement ---------- */
 function maxFilter(src, w, h, r) {
   const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -404,47 +409,90 @@ function normalize(img, mono) {
   }
   return ch;
 }
-// Stage 2 (fast): smooth, sharpen, tone. Works on copies of the cached channels.
-function tone(ch, W, H, mode, o) {
-  const N = W * H, mono = ch.length === 1, out = new ImageData(W, H), d = out.data;
-  if (o.smooth > 0) for (const a of ch) { const bl = boxBlur(a, W, H, 1); for (let i = 0; i < N; i++) a[i] += o.smooth * (bl[i] - a[i]); }
-  const amt = o.sharp * 1.8, sr = Math.max(1, Math.round(Math.min(W, H) / 550));
-  if (amt > 0) for (const a of ch) {
-    const bl = boxBlur(a, W, H, sr);
-    for (let i = 0; i < N; i++) { const v = a[i] + amt * (a[i] - bl[i]); a[i] = v < 0 ? 0 : v > 255 ? 255 : v; }
+// Stage 2: make the text readable.
+function sauvolaText(a, W, H) {
+  // Local adaptive threshold: every letter is judged against its own neighbourhood, so faint/dotted print turns solid black
+  const ms = Math.min(W, H), f = Math.max(1, Math.round(Math.sqrt(W * H / 1.1e6)));
+  const sw = Math.ceil(W / f), sh = Math.ceil(H / f);
+  const m1 = new Float32Array(sw * sh), m2 = new Float32Array(sw * sh), cnt = new Float32Array(sw * sh);
+  for (let y = 0; y < H; y++) { const gy = ((y / f) | 0) * sw; for (let x = 0; x < W; x++) { const gi = gy + ((x / f) | 0), v = a[y*W+x]; m1[gi] += v; m2[gi] += v*v; cnt[gi]++; } }
+  for (let i = 0; i < m1.length; i++) { m1[i] /= cnt[i]; m2[i] /= cnt[i]; }
+  const R = Math.max(3, Math.round(ms / 45 / f)), M = boxBlur(m1, sw, sh, R), Q = boxBlur(m2, sw, sh, R);
+  const K = 0.3, BIAS = 20, E = 14, out = new Uint8ClampedArray(W * H);
+  for (let y = 0; y < H; y++) {
+    const fy = Math.min(sh - 1.001, Math.max(0, y / f - 0.5)), y0 = fy | 0, ty = fy - y0;
+    for (let x = 0; x < W; x++) {
+      const fx = Math.min(sw - 1.001, Math.max(0, x / f - 0.5)), x0 = fx | 0, tx = fx - x0;
+      const i00 = y0*sw + x0, i10 = i00 + 1, i01 = i00 + sw, i11 = i01 + 1;
+      const w00 = (1-tx)*(1-ty), w10 = tx*(1-ty), w01 = (1-tx)*ty, w11 = tx*ty;
+      const m = M[i00]*w00 + M[i10]*w10 + M[i01]*w01 + M[i11]*w11, q = Q[i00]*w00 + Q[i10]*w10 + Q[i01]*w01 + Q[i11]*w11;
+      const sd = Math.sqrt(Math.max(0, q - m*m));
+      let T = m * (1 + K * (sd / 128 - 1)) + BIAS; if (T < 115) T = 115;   // solid dark areas (logos) stay black
+      let t = (a[y*W+x] - (T - E)) / (2 * E); t = t < 0 ? 0 : t > 1 ? 1 : t;
+      out[y*W+x] = t*t*(3 - 2*t) * 255;
+    }
+  }
+  return out;
+}
+function vBlur(a, w, h, r) {            // vertical-only box blur
+  const out = new Float32Array(w * h), col = new Float64Array(w);
+  for (let y = 0; y <= Math.min(r, h - 1); y++) for (let x = 0; x < w; x++) col[x] += a[y * w + x];
+  for (let y = 0; y < h; y++) {
+    const n = Math.min(h - 1, y + r) - Math.max(0, y - r) + 1, row = y * w;
+    for (let x = 0; x < w; x++) out[row + x] = col[x] / n;
+    if (y + r + 1 < h) { const rr = (y + r + 1) * w; for (let x = 0; x < w; x++) col[x] += a[rr + x]; }
+    if (y - r >= 0) { const rr = (y - r) * w; for (let x = 0; x < w; x++) col[x] -= a[rr + x]; }
+  }
+  return out;
+}
+function tone(ch, W, H, mode) {
+  const N = W * H, mono = ch.length === 1, out = new ImageData(W, H), d = out.data, ms = Math.min(W, H);
+  const sm = Math.max(1, Math.round(ms / 1300));
+  const smooth = mode === 'bw' ? 0.2 : 0.35, sharp = mode === 'bw' ? 0.8 : 0.9;
+  for (const a of ch) {                 // join the dots of thermal / dot-matrix print
+    const bl = boxBlur(a, W, H, sm); for (let i = 0; i < N; i++) a[i] += smooth * (bl[i] - a[i]);
+  }
+  for (const a of ch) {                 // then restore crisp edges
+    const bl = boxBlur(a, W, H, sm + 1);
+    for (let i = 0; i < N; i++) { const v = a[i] + sharp * (a[i] - bl[i]); a[i] = v < 0 ? 0 : v > 255 ? 255 : v; }
+  }
+  if (mode === 'bw') {                  // strengthen thin horizontal strokes that print very faintly
+    const a = ch[0], vb = vBlur(a, W, H, sm + 1);
+    for (let i = 0; i < N; i++) { const v = a[i] + 2.6 * (a[i] - vb[i]); a[i] = v < 0 ? 0 : v > 255 ? 255 : v; }
+  }
+  if (mode === 'bw') {
+    const t = sauvolaText(ch[0], W, H), ink = new Float32Array(N);
+    for (let i = 0; i < N; i++) ink[i] = 1 - t[i] / 255;
+    const bl = boxBlur(ink, W, H, 1);   // thicken hairline strokes slightly and join gaps, keeping edges anti-aliased
+    for (let i = 0, p = 0; i < N; i++, p += 4) {
+      let v = (bl[i] - 0.2) / 0.22; v = v < 0 ? 0 : v > 1 ? 1 : v; v = v*v*(3 - 2*v);
+      v = Math.max(v, ink[i]);
+      d[p] = d[p+1] = d[p+2] = 255 - v * 255; d[p+3] = 255;
+    }
+    return out;
   }
   const hist = new Uint32Array(256);
   for (let i = 0; i < N; i += 3) hist[(mono ? ch[0][i] : 0.299*ch[0][i] + 0.587*ch[1][i] + 0.114*ch[2][i]) | 0]++;
   let acc = 0, bp = 0; const tot = N / 3; for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc > tot * 0.004) { bp = i; break; } }
   bp = Math.min(bp, 110);
-  const white = 238, k = o.contrast * 1.2;
+  const white = 238, k = 0.72, COLOR = 0.25;
   const curve = v => { let t = (v - bp) / (white - bp); t = t < 0 ? 0 : t > 1 ? 1 : t; t = t + k * (t*t*(3 - 2*t) - t); return t * 255; };
-  if (mode === 'bw') {
-    const T = 140 + o.contrast * 70, e = 22;
-    for (let i = 0, p = 0; i < N; i++, p += 4) {
-      let t = (ch[0][i] - (T - e)) / (2 * e); t = t < 0 ? 0 : t > 1 ? 1 : t; t = t*t*(3 - 2*t);
-      d[p] = d[p+1] = d[p+2] = t * 255; d[p+3] = 255;
-    }
-  } else if (mode === 'gray') {
-    for (let i = 0, p = 0; i < N; i++, p += 4) { d[p] = d[p+1] = d[p+2] = curve(ch[0][i]); d[p+3] = 255; }
-  } else {
-    for (let i = 0, p = 0; i < N; i++, p += 4) {
-      const r = curve(ch[0][i]), g = curve(ch[1][i]), b = curve(ch[2][i]), l = 0.299*r + 0.587*g + 0.114*b;
-      d[p] = l + (r - l) * o.color; d[p+1] = l + (g - l) * o.color; d[p+2] = l + (b - l) * o.color; d[p+3] = 255;
-    }
+  if (mono) for (let i = 0, p = 0; i < N; i++, p += 4) { d[p] = d[p+1] = d[p+2] = curve(ch[0][i]); d[p+3] = 255; }
+  else for (let i = 0, p = 0; i < N; i++, p += 4) {
+    const r = curve(ch[0][i]), g = curve(ch[1][i]), b = curve(ch[2][i]), l = 0.299*r + 0.587*g + 0.114*b;
+    d[p] = l + (r - l) * COLOR; d[p+1] = l + (g - l) * COLOR; d[p+2] = l + (b - l) * COLOR; d[p+3] = 255;
   }
   return out;
 }
 
 /* ---------- Scan / render ---------- */
 let rotation = 0, wCanvas = null, warpId = 0, normCache = null, fullCache = null, lastFull = null;
-const PREVIEW_PX = 1.0e6;
-const opts = () => ({ contrast: +$('contrast').value / 100, sharp: +$('sharp').value / 100, smooth: +$('smooth').value / 100, color: +$('color').value / 100 });
-const settingsKey = () => [warpId, $('mode').value, $('contrast').value, $('sharp').value, $('smooth').value, $('color').value, $('trim').value, rotation].join('|');
+const PREVIEW_PX = 1.0e6, TRIM = 0.01;
+const settingsKey = () => [warpId, $('mode').value, rotation].join('|');
 
 function makeOutput(maxPx, useCache) {
-  const mode = $('mode').value, tp = +$('trim').value / 100;
-  const cx = Math.round(wCanvas.width * tp), cy = Math.round(wCanvas.height * tp), w2 = wCanvas.width - 2*cx, h2 = wCanvas.height - 2*cy;
+  const mode = $('mode').value;
+  const cx = Math.round(wCanvas.width * TRIM), cy = Math.round(wCanvas.height * TRIM), w2 = wCanvas.width - 2*cx, h2 = wCanvas.height - 2*cy;
   const sc = Math.min(1, Math.sqrt(maxPx / (w2 * h2))), cw = Math.max(16, Math.round(w2 * sc)), chh = Math.max(16, Math.round(h2 * sc));
   const c2 = document.createElement('canvas'); c2.width = cw; c2.height = chh;
   const x2 = c2.getContext('2d'); x2.imageSmoothingQuality = 'high';
@@ -453,11 +501,11 @@ function makeOutput(maxPx, useCache) {
   let outImg;
   if (mode === 'orig') outImg = img;
   else {
-    const mono = mode !== 'clean', key = `${warpId}|${tp}|${cw}x${chh}|${mono}`;
+    const mono = mode !== 'clean', key = `${warpId}|${cw}x${chh}|${mono}`;
     let ch;
     if (useCache) { if (!normCache || normCache.key !== key) normCache = { key, ch: normalize(img, mono) }; ch = normCache.ch.map(a => a.slice()); }
     else ch = normalize(img, mono);
-    outImg = tone(ch, cw, chh, mode, opts());
+    outImg = tone(ch, cw, chh, mode);
   }
   const t = document.createElement('canvas'); t.width = cw; t.height = chh; t.getContext('2d').putImageData(outImg, 0, 0);
   const r = rotation % 4, sw = r % 2 ? chh : cw, sh = r % 2 ? cw : chh;
@@ -498,7 +546,6 @@ $('scanBtn').onclick = () => {
 };
 $('mode').onchange = () => scheduleRender(20);
 $('rotBtn').onclick = () => { rotation++; scheduleRender(20); };
-['contrast', 'sharp', 'smooth', 'color', 'trim'].forEach(id => $(id).addEventListener('input', () => scheduleRender(150)));
 
 /* ---------- Saving ---------- */
 const stamp = () => { const n = new Date(), p = x => String(x).padStart(2, '0'); return `receipt-${n.getFullYear()}${p(n.getMonth()+1)}${p(n.getDate())}-${p(n.getHours())}${p(n.getMinutes())}${p(n.getSeconds())}`; };
